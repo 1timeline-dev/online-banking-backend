@@ -5,6 +5,8 @@ import {
   forgotPassword,
   resetPassword,
   verifyEmail,
+  verifyEmailOtp,
+  resendEmailOtp,
 } from "../controllers/authController.js";
 import validate from "../middleware/validate.js";
 import {
@@ -12,6 +14,7 @@ import {
   loginValidation,
   registerValidation,
   resetPasswordValidation,
+  verifyEmailOtpValidation,
 } from "../validators/authValidators.js";
 
 const router = express.Router();
@@ -21,6 +24,8 @@ router.post("/register", registerValidation, validate, register);
 router.post("/login", loginValidation, validate, login);
 
 // Email Verification
+router.post("/verify-email-otp", verifyEmailOtpValidation, validate, verifyEmailOtp);
+router.post("/resend-email-otp", emailValidation, validate, resendEmailOtp);
 router.get("/verify-email/:token", verifyEmail);
 
 // Password Reset

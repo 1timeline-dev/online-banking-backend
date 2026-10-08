@@ -28,6 +28,11 @@ export const emailValidation = [
   body("email").isEmail().withMessage("A valid email is required.").normalizeEmail(),
 ];
 
+export const verifyEmailOtpValidation = [
+  ...emailValidation,
+  body("otp").isString().matches(/^\d{6}$/).withMessage("OTP must be a 6-digit code."),
+];
+
 export const resetPasswordValidation = [
   param("token").isHexadecimal().isLength({ min: 64, max: 64 }).withMessage("Invalid reset token."),
   passwordRules(),

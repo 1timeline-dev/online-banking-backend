@@ -71,6 +71,30 @@ const userSchema = new mongoose.Schema(
       select: false,
     },
 
+    emailOtp: {
+      type: String,
+      default: null,
+      select: false,
+    },
+
+    emailOtpExpires: {
+      type: Date,
+      default: null,
+      select: false,
+    },
+
+    emailOtpAttempts: {
+      type: Number,
+      default: 0,
+      select: false,
+    },
+
+    emailOtpSentAt: {
+      type: Date,
+      default: null,
+      select: false,
+    },
+
     // Freeze Account
     isFrozen: {
       type: Boolean,

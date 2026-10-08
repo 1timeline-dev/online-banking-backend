@@ -4,7 +4,8 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 
 import { sendResetPasswordEmail } from "../utils/resetPasswordEmail.js";
-import { sendVerificationEmail } from "../utils/verificationEmail.js";
+import { sendVerificationOtpEmail } from "../utils/verificationEmail.js";
+import { generateOTP, hashOTP, otpMatches } from "../utils/otp.js";
 
 // ================= GENERATE ACCOUNT NUMBER =================
 
@@ -12,6 +13,22 @@ const generateAccountNumber = () => {
   return Math.floor(
     1000000000 + Math.random() * 9000000000
   ).toString();
+};
+
+// ================= OTP HELPERS =================
+
+const OTP_EXPIRY_MS = 10 * 60 * 1000; // code valid for 10 minutes
+const OTP_MAX_ATTEMPTS = 5; // wrong guesses allowed per code
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000; // wait 60s between emails
+
+// Puts a fresh OTP on the user document (caller saves it) and returns the plain code
+const attachNewOtp = (user) => {
+  const otp = generateOTP();
+  user.emailOtp = hashOTP(otp);
+  user.emailOtpExpires = new Date(Date.now() + OTP_EXPIRY_MS);
+  user.emailOtpAttempts = 0;
+  user.emailOtpSentAt = new Date();
+  return otp;
 };
 
 // ================= REGISTER =================
@@ -38,10 +55,12 @@ export const register = async (req, res) => {
     console.log("Email:", email);
     console.log("=================================");
 
-    // Check if email already exists
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email }).select(
+      "+emailOtpSentAt"
+    );
 
-    if (existingUser) {
+    // Verified accounts can't be registered again
+    if (existingUser && existingUser.isVerified) {
       console.log("⚠️ Registration rejected: email already exists");
 
       return res.status(400).json({
@@ -50,68 +69,88 @@ export const register = async (req, res) => {
       });
     }
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Generate verification token
-    const verificationToken = crypto
-      .randomBytes(32)
-      .toString("hex");
+    // ---------- Unverified account already exists: send a fresh code ----------
+    if (existingUser) {
+      const sentAgo = existingUser.emailOtpSentAt
+        ? Date.now() - existingUser.emailOtpSentAt.getTime()
+        : Infinity;
 
-    // Generate account number
+      if (sentAgo < OTP_RESEND_COOLDOWN_MS) {
+        const wait = Math.ceil((OTP_RESEND_COOLDOWN_MS - sentAgo) / 1000);
+
+        return res.status(429).json({
+          success: false,
+          message: `A code was just sent. Please wait ${wait}s before trying again.`,
+        });
+      }
+
+      existingUser.fullname = fullname;
+      existingUser.password = hashedPassword;
+      const otp = attachNewOtp(existingUser);
+      await existingUser.save();
+
+      try {
+        await sendVerificationOtpEmail(existingUser.email, otp);
+      } catch (emailError) {
+        console.error("❌ VERIFICATION EMAIL FAILED");
+        console.error(emailError);
+
+        return res.status(500).json({
+          success: false,
+          message:
+            "We could not send the verification code. Please try again.",
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        requiresVerification: true,
+        email: existingUser.email,
+        message: "A new verification code has been sent to your email.",
+      });
+    }
+
+    // ---------- Brand new account ----------
     const accountNumber = generateAccountNumber();
 
-    // Create user
-    const user = await User.create({
+    const user = new User({
       fullname,
       email,
       password: hashedPassword,
       accountNumber,
-      verificationToken,
       isVerified: false,
     });
+
+    const otp = attachNewOtp(user);
+    await user.save();
 
     console.log("✅ USER CREATED");
     console.log("User ID:", user._id);
     console.log("Email:", user.email);
 
-    // ================= SEND VERIFICATION EMAIL =================
-
     try {
-      console.log("📧 Sending verification email...");
-      console.log("To:", user.email);
+      await sendVerificationOtpEmail(user.email, otp);
 
-      await sendVerificationEmail(
-        user.email,
-        verificationToken
-      );
-
-      console.log("✅ VERIFICATION EMAIL SENT");
+      console.log("✅ VERIFICATION CODE SENT");
 
       return res.status(201).json({
         success: true,
-        message:
-          "Registration successful. A verification link has been sent to your email.",
+        requiresVerification: true,
+        email: user.email,
+        message: "Registration successful. A 6-digit code has been sent to your email.",
       });
-
     } catch (emailError) {
       console.error("❌ VERIFICATION EMAIL FAILED");
       console.error(emailError);
 
-      // Remove the newly-created account if the email
-      // could not be sent. This prevents users from being
-      // stuck with an unverified account.
+      // Remove the new account so the user can simply try again
       try {
         await User.findByIdAndDelete(user._id);
-
-        console.log(
-          "🗑️ User removed because verification email failed."
-        );
+        console.log("🗑️ User removed because verification email failed.");
       } catch (deleteError) {
-        console.error(
-          "❌ Could not remove failed registration:",
-          deleteError
-        );
+        console.error("❌ Could not remove failed registration:", deleteError);
       }
 
       return res.status(500).json({
@@ -120,16 +159,13 @@ export const register = async (req, res) => {
           "Account could not be created because the verification email could not be sent. Please try again.",
       });
     }
-
   } catch (error) {
     console.error("❌ REGISTRATION ERROR");
     console.error(error);
 
     // Handle duplicate email/account number race conditions
     if (error.code === 11000) {
-      const duplicateField = Object.keys(
-        error.keyPattern || {}
-      )[0];
+      const duplicateField = Object.keys(error.keyPattern || {})[0];
 
       if (duplicateField === "email") {
         return res.status(400).json({
@@ -141,8 +177,7 @@ export const register = async (req, res) => {
       if (duplicateField === "accountNumber") {
         return res.status(500).json({
           success: false,
-          message:
-            "Could not generate a unique account number. Please try again.",
+          message: "Could not generate a unique account number. Please try again.",
         });
       }
     }
@@ -150,6 +185,145 @@ export const register = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Registration failed. Please try again.",
+    });
+  }
+};
+
+// ================= VERIFY EMAIL (OTP) =================
+
+export const verifyEmailOtp = async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    const user = await User.findOne({
+      email: email?.trim().toLowerCase(),
+    }).select("+emailOtp +emailOtpExpires +emailOtpAttempts");
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired code.",
+      });
+    }
+
+    if (user.isVerified) {
+      return res.status(200).json({
+        success: true,
+        message: "Email already verified. You can log in.",
+      });
+    }
+
+    if (
+      !user.emailOtp ||
+      !user.emailOtpExpires ||
+      user.emailOtpExpires < new Date()
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "This code has expired. Please request a new one.",
+      });
+    }
+
+    if (user.emailOtpAttempts >= OTP_MAX_ATTEMPTS) {
+      return res.status(429).json({
+        success: false,
+        message: "Too many incorrect attempts. Please request a new code.",
+      });
+    }
+
+    if (!otpMatches(otp, user.emailOtp)) {
+      user.emailOtpAttempts += 1;
+      await user.save();
+
+      const left = OTP_MAX_ATTEMPTS - user.emailOtpAttempts;
+
+      return res.status(400).json({
+        success: false,
+        message:
+          left > 0
+            ? `Incorrect code. ${left} attempt${left === 1 ? "" : "s"} left.`
+            : "Too many incorrect attempts. Please request a new code.",
+      });
+    }
+
+    user.isVerified = true;
+    user.emailOtp = null;
+    user.emailOtpExpires = null;
+    user.emailOtpAttempts = 0;
+    user.emailOtpSentAt = null;
+    await user.save();
+
+    console.log("✅ Email verified:", user.email);
+
+    return res.status(200).json({
+      success: true,
+      message: "Email verified successfully. You can now log in.",
+    });
+  } catch (error) {
+    console.error("❌ OTP verification error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Verification failed. Please try again.",
+    });
+  }
+};
+
+// ================= RESEND OTP =================
+
+export const resendEmailOtp = async (req, res) => {
+  try {
+    const email = req.body.email?.trim().toLowerCase();
+
+    const user = await User.findOne({ email }).select("+emailOtpSentAt");
+
+    // Same response whether or not the account exists / is verified
+    if (!user || user.isVerified) {
+      return res.status(200).json({
+        success: true,
+        message: "If this account needs verification, a new code has been sent.",
+      });
+    }
+
+    const sentAgo = user.emailOtpSentAt
+      ? Date.now() - user.emailOtpSentAt.getTime()
+      : Infinity;
+
+    if (sentAgo < OTP_RESEND_COOLDOWN_MS) {
+      const wait = Math.ceil((OTP_RESEND_COOLDOWN_MS - sentAgo) / 1000);
+
+      return res.status(429).json({
+        success: false,
+        message: `Please wait ${wait}s before requesting another code.`,
+        retryAfter: wait,
+      });
+    }
+
+    const otp = attachNewOtp(user);
+    await user.save();
+
+    try {
+      await sendVerificationOtpEmail(user.email, otp);
+    } catch (emailError) {
+      console.error("❌ RESEND EMAIL FAILED");
+      console.error(emailError);
+
+      return res.status(500).json({
+        success: false,
+        message: "We could not send the code. Please try again.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "A new verification code has been sent to your email.",
+    });
+  } catch (error) {
+    console.error("❌ Resend OTP error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Could not resend the code. Please try again.",
     });
   }
 };
@@ -180,15 +354,6 @@ export const login = async (req, res) => {
       });
     }
 
-    // Email verification check
-    if (!user.isVerified) {
-      return res.status(401).json({
-        success: false,
-        message:
-          "Please verify your email before logging in.",
-      });
-    }
-
     // Frozen account check
     if (user.isFrozen) {
       return res.status(403).json({
@@ -208,6 +373,16 @@ export const login = async (req, res) => {
       return res.status(401).json({
         success: false,
         message: "Invalid password",
+      });
+    }
+
+    // Email verification check (after the password is confirmed)
+    if (!user.isVerified) {
+      return res.status(403).json({
+        success: false,
+        needsVerification: true,
+        email: user.email,
+        message: "Please verify your email before logging in.",
       });
     }
 

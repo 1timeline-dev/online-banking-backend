@@ -1,5 +1,29 @@
 import { sendEmail } from "../../emailTransport.js";
 
+export const sendVerificationOtpEmail = async (email, otp) => {
+  try {
+    const info = await sendEmail({
+      to: email,
+      subject: "Your SecureTrust Bank verification code",
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:30px;color:#0f172a;">
+          <h1 style="color:#0f766e;">SecureTrust Bank</h1>
+          <h2>Verify your email address</h2>
+          <p>Enter this one-time code to finish creating your account:</p>
+          <p style="margin:28px 0;font-size:32px;font-weight:bold;letter-spacing:8px;">${otp}</p>
+          <p>This code expires in 10 minutes. If you did not create an account, you can ignore this email.</p>
+        </div>
+      `,
+    });
+
+    console.log("✅ VERIFICATION CODE SENT. Message ID:", info.messageId);
+    return info;
+  } catch (error) {
+    console.error("❌ VERIFICATION EMAIL FAILED!", error.message);
+    throw error;
+  }
+};
+
 export const sendVerificationEmail = async (email, token) => {
   const verificationLink =
     `${process.env.API_URL.replace(/\/$/, "")}/api/auth/verify-email/${token}`;
