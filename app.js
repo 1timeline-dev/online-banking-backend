@@ -24,7 +24,7 @@ const allowedOrigins = [
   "http://localhost:3000",
   "http://127.0.0.1:5173",
   "https://banking-frontend-bay.vercel.app",
-  "https://banking-frontend-bay.vercel.app",
+  "https://suretrust-bank.vercel.ap/",
 ];
 
 // Add process.env.CLIENT_URL if defined (supports comma-separated list)
